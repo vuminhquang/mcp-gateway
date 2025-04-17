@@ -6,9 +6,6 @@ from xetrack import Reader
 import os
 
 
-# TODO remove this
-temp_directory = TemporaryDirectory()
-
 @pytest.fixture(scope="module")
 def temp_directory():
     """

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 from xetrack import Tracker
 from xetrack.logging import LOGURU_PARAMS
 from mcp_gateway.plugins.base import TracingPlugin, PluginContext
-
+from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 class XetrackParams:
@@ -30,45 +30,54 @@ def to_events(context: PluginContext, event: Dict[str, Any]) -> List[Dict[str, A
     Returns:
         The updated event dictionary
     """
-
+    event.pop("mcp_context", None) # Internal context not needed for logging
+    arguments:Dict[str,Any] = {}
+    if hasattr(context,"arguments"):
+        arguments = context.arguments # type: ignore
+    if hasattr(arguments, "model_dump"):
+        arguments = arguments.model_dump() # type: ignore
+    if not isinstance(arguments, dict):
+        arguments = {"arguments":arguments} # edge case
+    
+    event["arguments"] = arguments
     if XetrackParams.FLATTEN_ARGUMENTS:
-        arguments = context.arguments or {}
         for key, value in arguments.items():
             event[key] = value
         event.pop("arguments", None)
 
-    response = context.response or {}
-    event["response_type"] = 'unknown' if response is None else type(response).__name__ # type: ignore
+    context_response:Any|Dict[str,Any]|tuple[Any,str] = context.response or {}
+    event["response_type"] = 'unknown' if context_response is None else type(context_response).__name__ # type: ignore
+      
+    response:Dict[str,Any] = {}
+    try:
+        if hasattr(context_response, "model_dump"):
+            response = context_response.model_dump() # type: ignore
+        elif (
+            isinstance(context_response, tuple)
+            and len(context_response) == 2 # type: ignore
+        ):
+            # For resource responses (content, mime_type)
+            content, mime_type = context_response # type: ignore
+            if mime_type and ("text" in mime_type or "json" in mime_type):
+                try:
+                    content_str = content.decode("utf-8", errors="replace")                            
+                    response["content"] = content_str
+                    
+                except:
+                    response["content"] = "<binary data>"
+            else:
+                response["content"] = (
+                    f"<binary data ({len(content)} bytes)>"
+                )
+            response["mime_type"] = mime_type
+    except Exception as e:
+        response["error_getting_response"] = str(e)    
+
     for key, value in response.items():
         event[key] = value        
     event.pop("response", None)
 
-    
-    try:
-        if hasattr(context.response, "model_dump"):
-            response = context.response.model_dump()
-        elif (
-            isinstance(response, tuple)
-            and len(response) == 2 # type: ignore
-        ):
-            # For resource responses (content, mime_type)
-            content, mime_type = context.response
-            if mime_type and ("text" in mime_type or "json" in mime_type):
-                try:
-                    content_str = content.decode("utf-8", errors="replace")                            
-                    event["content"] = content_str
-                    
-                except:
-                    event["content"] = "<binary data>"
-            else:
-                event["content"] = (
-                    f"<binary data ({len(content)} bytes)>"
-                )
-            event["mime_type"] = mime_type
-    except Exception as e:
-        event["error_getting_response"] = str(e)    
-
-
+    event["call_id"] = str(uuid4())    
     if not XetrackParams.FLATTEN_RESPONSE:
         return [event]
         
@@ -78,8 +87,7 @@ def to_events(context: PluginContext, event: Dict[str, Any]) -> List[Dict[str, A
         for key, value in content.items():
             content_event[f"content_{key}"] = value
         
-        events.append(content_event)    
-    
+        events.append(content_event)        
 
     return events
 
@@ -101,8 +109,8 @@ class XetrackTracingPlugin(TracingPlugin):
         """
         Loads configuration for the tracing plugin.
 
-        Configuration options:
-        - db_path: The path to the database file (default: Tracker.IN_MEMORY)
+        Main configuration options:
+        - db_path: The path to the database file (default: Tracker.SKIP_INSERT)
         - logs_path: The path to the logs file (default: None)
         - logs_stdout: Whether to log to stdout (default: False)
         """
@@ -123,15 +131,18 @@ class XetrackTracingPlugin(TracingPlugin):
             f"logs_path={self.logs_path}, logs_stdout={self.logs_stdout}"
         )
 
-    def process_request(self, context: PluginContext) -> Optional[Dict[str, Any]]:
+    def process_request(self, context: PluginContext) -> Optional[Dict[str, Any]]|PluginContext: # type: ignore
         """Logs request data."""
-        # Tracing plugins don't modify the request
-        return context.arguments
+        
+        if hasattr(context, "arguments"):
+            return context.arguments        
+        return context
 
     def process_response(self, context: PluginContext) -> Any:
         """Logs response data."""    
         event: Dict[str, Any] = context.to_dict()
+        
         events = to_events(context, event)
-        for event in events:
+        for event in events:            
             self.tracker.log(event)
         return context.response

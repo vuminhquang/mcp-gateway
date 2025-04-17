@@ -5,7 +5,6 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
-
 class PluginContext:
     """Holds contextual information for plugin execution."""
 
@@ -38,7 +37,10 @@ class PluginContext:
             "response": self.response,
             "mcp_context": self.mcp_context,
         }
-
+    
+    def _replace(self, arguments: Dict[str,Any]) -> bool:
+        self.arguments =arguments
+        return True
 
 # --- Base Plugin Interface ---
 
