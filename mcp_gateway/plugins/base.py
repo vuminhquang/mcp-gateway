@@ -39,7 +39,7 @@ class PluginContext:
         }
     
     def _replace(self, arguments: Dict[str,Any]) -> bool:
-        self.arguments =arguments
+        self.arguments = arguments
         return True
 
 # --- Base Plugin Interface ---

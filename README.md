@@ -273,7 +273,7 @@ mcp-gateway --enable-tracing xetrack
 }
 ```
 
-Let's say you use the  filesystem *list_directory* tool on path *"."*, you can find the call parameters under `/logs/<date>.log`.
+Let's say you use the  filesystem *list_directory* tool on path *"."*, you can find the call parameters under `logs/<date>.log`.
 
 You can expolre using [xetrack cli](https://github.com/xdssio/xetrack?tab=readme-ov-file#cli) to query the db:
 
