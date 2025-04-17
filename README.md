@@ -218,6 +218,51 @@ Key Features
 * Provides usage analytics and pattern identification for optimization.
 * Sanitizes sensitive information before forwarding requests to other MCPs.
 
+## Tracing
+
+### Xetrack
+[xetrack](https://github.com/xdssio/xetrack) is a lightweight package to track experiments benchmarks, and monitor stractured data using duckdb and sqlite.
+It will create and maintian a database with each tool_call for you to explore with duckdb, sqlite or pandas using xetrack.
+It can also log to logs folder.
+
+```bash
+mcp-gateway --enable-tracing xetrack
+
+```
+#### Prerequisites
+`pip install xetrack`
+
+Example 
+```
+{
+    "mcpServers": {
+        "mcp-gateway": {
+            "command": "mcp-gateway",
+            "args": [
+                "--mcp-json-path",
+                "~/development/xdss/mcp-gateway/.cursor/mcp.json",
+                "--enable-tracing",
+                "xetrack"
+            ],
+            "env": {
+                "XETRACK_DB_PATH": "tracing.db",
+                "XETRACK_LOGS_PATH": "logs/",                
+            },
+            "servers": {
+                "filesystem": {
+                    "command": "npx",
+                    "args": [
+                        "-y",
+                        "@modelcontextprotocol/server-filesystem",
+                        "./tests"
+                    ]
+                }
+            }
+        }
+    }
+}
+```
+
 ## License
 
 MIT
