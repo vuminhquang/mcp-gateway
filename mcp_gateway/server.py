@@ -12,6 +12,8 @@ from typing import Any, Dict, AsyncIterator, List, Optional, Tuple
 from mcp.server.fastmcp import FastMCP, Context
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
+from mcp.client.sse import sse_client
+from mcp.client.websocket import websocket_client
 
 from mcp_gateway.config import load_config
 from mcp_gateway.sanitizers import (
@@ -64,18 +66,39 @@ class Server:
         """Async context manager to handle the startup and shutdown of the server's session."""
         logger.info(f"[{self.name}] Entering manage_lifecycle context...")
         local_exit_stack = AsyncExitStack() # Stack specific to this server's lifecycle
-        try:
-            logger.info(f"[{self.name}] Starting underlying process and establishing connection...")
-            server_params = StdioServerParameters(
-                command=self.config.get("command", ""),
-                args=self.config.get("args", []),
-                env=self.config.get("env", None),
-                cwd=self.config.get("cwd", None) # Add cwd if needed
-            )
+        client_cm = None # Context manager for the specific client transport
+        transport = self.config.get("transport")
 
-            # Enter stdio_client context managed by the local stack
-            stdio_cm = stdio_client(server_params)
-            read, write = await local_exit_stack.enter_async_context(stdio_cm)
+        try:
+            logger.info(f"[{self.name}] Starting connection based on transport type: '{transport}'")
+
+            # --- Determine client context manager based on transport --- 
+            if transport == "stdio":
+                server_params = StdioServerParameters(
+                    command=self.config.get("command"), # Let validation handle missing keys
+                    args=self.config.get("args"),
+                    env=self.config.get("env"),
+                    cwd=self.config.get("cwd")
+                )
+                client_cm = stdio_client(server_params)
+            elif transport == "sse":
+                endpoint = self.config.get("endpoint")
+                if not endpoint:
+                    raise ValueError(f"Missing 'endpoint' configuration for SSE server '{self.name}'")
+                # Pass endpoint URL directly to sse_client
+                client_cm = sse_client(url=endpoint)
+            elif transport in ["websocket", "ws"]: # Handle both ws and websocket
+                endpoint = self.config.get("endpoint")
+                if not endpoint:
+                     raise ValueError(f"Missing 'endpoint' configuration for WebSocket server '{self.name}'")
+                 # Pass endpoint URL directly to websocket_client
+                client_cm = websocket_client(url=endpoint)
+            else:
+                raise ValueError(f"Unsupported transport type '{transport}' for server '{self.name}'")
+            # --- End transport handling ---
+
+            # Enter the chosen client context manager managed by the local stack
+            read, write = await local_exit_stack.enter_async_context(client_cm)
 
             # Enter ClientSession context managed by the local stack
             session_cm = ClientSession(read, write)
@@ -83,7 +106,7 @@ class Server:
 
             # Initialize the session
             self._server_info = await self._session.initialize()
-            logger.info(f"[{self.name}] Started and initialized successfully within manage_lifecycle.")
+            logger.info(f"[{self.name}] Connection established and initialized successfully.")
 
             yield # Server is ready and session is active
 
@@ -96,7 +119,7 @@ class Server:
             raise 
         finally:
             logger.info(f"[{self.name}] Exiting manage_lifecycle context, cleaning up resources...")
-            # The local_exit_stack will automatically clean up stdio_client and ClientSession
+            # The local_exit_stack will automatically clean up the client_cm and ClientSession
             await local_exit_stack.aclose() 
             # Reset members after cleanup
             self._session = None
@@ -249,6 +272,74 @@ class GetewayContext:
     plugin_manager: Optional[PluginManager] = None
 
 
+# --- NEW Debug Helper Function --- #
+async def _debug_aggregate_tools(gateway_context: GetewayContext) -> List[Dict[str, Any]]:
+    """Debug helper to aggregate tools directly from the gateway context."""
+    aggregated_tools = []
+    logger.info("[Gateway Lifespan Debug] Aggregating tools directly...")
+
+    if not gateway_context or not gateway_context.proxied_servers:
+        logger.warning("[Gateway Lifespan Debug] No proxied servers found in context.")
+        return []
+
+    for server_name, server_instance in gateway_context.proxied_servers.items():
+        logger.info(f"[Gateway Lifespan Debug] Getting tools from proxied server: {server_name}")
+        try:
+            if server_instance.session is None or server_instance._server_info is None:
+                logger.error(f"[Gateway Lifespan Debug] Proxied server '{server_name}' session/info not ready. Skipping.")
+                continue
+
+            logger.debug(f"[Gateway Lifespan Debug] Calling list_tools on proxied server: {server_name}")
+            list_tools_result = await server_instance.list_tools() # Assign to new variable
+            
+            # <<< Check result and access .tools attribute >>>
+            actual_tools = []
+            if list_tools_result and hasattr(list_tools_result, 'tools') and list_tools_result.tools:
+                actual_tools = list_tools_result.tools # Get the actual list
+            
+            logger.debug(f"[Gateway Lifespan Debug] list_tools returned for {server_name}. Found {len(actual_tools)} tools.")
+
+            if actual_tools: # Iterate over the actual list
+                for tool in actual_tools:
+                    prefixed_tool_name = f"{server_name}/{tool.name}"
+                    logger.debug(f"[Gateway Lifespan Debug] Adding tool: {prefixed_tool_name}")
+                    # Extract schema safely
+                    schema_dict = {}
+                    try:
+                        if hasattr(tool.inputSchema, 'model_dump'):
+                            schema_dict = tool.inputSchema.model_dump()
+                        elif hasattr(tool.inputSchema, 'dict'):
+                            schema_dict = tool.inputSchema.dict()
+                        elif isinstance(tool.inputSchema, dict):
+                             schema_dict = tool.inputSchema
+                        elif tool.inputSchema is not None:
+                             logger.warning(f"[Gateway Lifespan Debug] Tool '{prefixed_tool_name}' has unexpected inputSchema type: {type(tool.inputSchema)}. Using empty schema.")
+                    except Exception as schema_err:
+                         logger.error(f"[Gateway Lifespan Debug] Error getting schema for tool '{prefixed_tool_name}': {schema_err}")
+                    
+                    tool_dict = {
+                        "name": prefixed_tool_name,
+                        "description": tool.description,
+                        "inputSchema": schema_dict,
+                    }
+                    aggregated_tools.append(tool_dict)
+        except Exception as e:
+            logger.error(f"[Gateway Lifespan Debug] Error getting tools from server '{server_name}': {e}", exc_info=True)
+
+    logger.info(f"[Gateway Lifespan Debug] Finished aggregating tools. Total tools found: {len(aggregated_tools)}")
+    
+    # Dump to file for inspection
+    dump_file_path = "gateway_lifespan_metadata_dump.json"
+    try:
+        with open(dump_file_path, "w") as f:
+            json.dump(aggregated_tools, f, indent=2)
+        logger.info(f"[Gateway Lifespan Debug] Successfully dumped metadata to {dump_file_path}")
+    except Exception as dump_error:
+        logger.error(f"[Gateway Lifespan Debug] Failed to dump metadata to {dump_file_path}: {dump_error}")
+        
+    return aggregated_tools
+# --- End Debug Helper Function --- #
+
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[GetewayContext]:
     """Manages the lifecycle of proxied MCP servers and plugins."""
@@ -343,6 +434,15 @@ async def lifespan(server: FastMCP) -> AsyncIterator[GetewayContext]:
             context.proxied_servers = successfully_started_servers # Only add successfully started servers
             logger.info(f"Finished starting servers. {len(context.proxied_servers)} successfully started.")
 
+            # --- <<< Call the Debug Aggregation Function Here >>> --- #
+            if context.proxied_servers:
+                try:
+                    debug_tools = await _debug_aggregate_tools(context)
+                    logger.info(f"[Gateway Lifespan Debug] Direct aggregation result preview: {str(debug_tools)[:200]}...")
+                except Exception as debug_e:
+                    logger.error(f"[Gateway Lifespan Debug] Error running direct tool aggregation: {debug_e}", exc_info=True)
+            # --- <<< End Debug Call >>> --- 
+
         # Yield the context with successfully started servers
         logger.info("MCP Gateway Lifespan entering operational state...")
         yield context
@@ -360,55 +460,73 @@ mcp = FastMCP("MCP Gateway", lifespan=lifespan, version="0.1.0")
 
 
 @mcp.tool()
-async def get_metadata(ctx: Context) -> Dict[str, Any]:
-    """Internal tool to retrieve metadata about all proxied servers and their tools."""
+async def get_metadata(ctx: Context) -> List[Dict[str, Any]]:
+    """Aggregates tools from all connected proxied servers."""
     gateway_context: GetewayContext = ctx.request_context.lifespan_context
-    all_metadata = {}
-    logger.info("[Gateway Tool] Received request for get_metadata")
+    aggregated_tools = []
+    logger.info("[Gateway Tool] Received request for get_metadata - Aggregating tools...")
 
     if not gateway_context or not gateway_context.proxied_servers:
         logger.warning("[Gateway Tool] get_metadata called, but no proxied servers found in context.")
-        return {"error": "No proxied servers configured or available."}
+        return []
 
     for server_name, server_instance in gateway_context.proxied_servers.items():
-        logger.info(f"[Gateway Tool] Processing get_metadata for proxied server: {server_name}")
-        server_meta = {"description": server_instance.config.get("description", "N/A"), "tools": []}
+        logger.info(f"[Gateway Tool] Getting tools from proxied server: {server_name}")
         try:
-            # Ensure the server session is started and initialized before querying
-            if server_instance._session is None or server_instance._server_info is None:
-                 logger.warning(f"[Gateway Tool] Proxied server '{server_name}' session/info not ready. Attempting start...")
-                 # This might be risky if called concurrently, but let's try
-                 # await server_instance.start() # Avoid starting here, should be done in lifespan
-                 if server_instance._session is None or server_instance._server_info is None:
-                      logger.error(f"[Gateway Tool] Proxied server '{server_name}' still not ready after check. Skipping.")
-                      server_meta["error"] = "Server not initialized"
-                      all_metadata[server_name] = server_meta
-                      continue
+            if server_instance.session is None or server_instance._server_info is None:
+                logger.error(f"[Gateway Tool] Proxied server '{server_name}' session/info not ready. Skipping.")
+                continue
 
             logger.debug(f"[Gateway Tool] Calling list_tools on proxied server: {server_name}")
-            tools_list = await server_instance.list_tools()
-            logger.debug(f"[Gateway Tool] list_tools returned for {server_name}. Found {len(tools_list)} tools.")
+            list_tools_result = await server_instance.list_tools() # Assign to new variable
 
-            if tools_list:
-                 # Convert tools to the expected dictionary format if necessary
-                 # Assuming list_tools returns a list of types.Tool objects
-                 for tool in tools_list:
-                     tool_dict = {
-                         "name": tool.name,
-                         "description": tool.description,
-                         # Use model_dump or dict() depending on pydantic version if inputSchema is a model
-                         "inputSchema": tool.inputSchema.model_dump() if hasattr(tool.inputSchema, 'model_dump') else tool.inputSchema.dict() if hasattr(tool.inputSchema, 'dict') else tool.inputSchema,
-                         # Add other relevant fields if needed
-                     }
-                     server_meta["tools"].append(tool_dict)
-            all_metadata[server_name] = server_meta
+            # <<< Check result and access .tools attribute >>>
+            actual_tools = []
+            if list_tools_result and hasattr(list_tools_result, 'tools') and list_tools_result.tools:
+                actual_tools = list_tools_result.tools # Get the actual list
+            
+            logger.debug(f"[Gateway Tool] list_tools returned for {server_name}. Found {len(actual_tools)} tools.")
+
+            if actual_tools: # Iterate over the actual list
+                for tool in actual_tools:
+                    prefixed_tool_name = f"{server_name}/{tool.name}"
+                    logger.debug(f"[Gateway Tool] Adding tool: {prefixed_tool_name}")
+                    # Extract schema safely (copied from debug helper)
+                    schema_dict = {}
+                    try:
+                        if hasattr(tool.inputSchema, 'model_dump'):
+                            schema_dict = tool.inputSchema.model_dump()
+                        elif hasattr(tool.inputSchema, 'dict'):
+                            schema_dict = tool.inputSchema.dict()
+                        elif isinstance(tool.inputSchema, dict):
+                             schema_dict = tool.inputSchema
+                        elif tool.inputSchema is not None:
+                             logger.warning(f"[Gateway Tool] Tool '{prefixed_tool_name}' has unexpected inputSchema type: {type(tool.inputSchema)}. Using empty schema.")
+                    except Exception as schema_err:
+                         logger.error(f"[Gateway Tool] Error getting schema for tool '{prefixed_tool_name}': {schema_err}")
+                    
+                    tool_dict = {
+                        "name": prefixed_tool_name,
+                        "description": tool.description,
+                        "inputSchema": schema_dict, 
+                    }
+                    aggregated_tools.append(tool_dict)
         except Exception as e:
-            logger.error(f"[Gateway Tool] Error getting metadata for server '{server_name}': {e}", exc_info=True)
-            server_meta["error"] = str(e)
-            all_metadata[server_name] = server_meta
+            logger.error(f"[Gateway Tool] Error getting tools from server '{server_name}': {e}", exc_info=True)
+
+    logger.info(f"[Gateway Tool] Finished aggregating tools. Total tools found: {len(aggregated_tools)}")
     
-    logger.info("[Gateway Tool] Finished processing get_metadata for all servers.")
-    return all_metadata
+    # --- Debug Dump (Keep for now) ---
+    dump_file_path = "gateway_metadata_dump.json"
+    try:
+        with open(dump_file_path, "w") as f:
+            json.dump(aggregated_tools, f, indent=2)
+        logger.info(f"[Gateway Tool Debug] Successfully dumped metadata to {dump_file_path}")
+    except Exception as dump_error:
+        logger.error(f"[Gateway Tool Debug] Failed to dump metadata to {dump_file_path}: {dump_error}")
+    # --- End Debug ---
+
+    return aggregated_tools
 
 
 @mcp.tool()
