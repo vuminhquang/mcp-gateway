@@ -48,64 +48,60 @@ class Server:
         self.name = name
         self.config = config
         self._session: Optional[ClientSession] = None
-        self._client_cm: Optional[
-            AsyncIterator[Tuple[asyncio.StreamReader, asyncio.StreamWriter]]
-        ] = None
         self._server_info: Optional[types.InitializeResult] = None
-        self._exit_stack = AsyncExitStack()
-        logger.info(f"Initialized Proxied Server: {self.name}")
+        logger.info(f"Initialized Proxied Server object: {self.name}")
 
     @property
     def session(self) -> ClientSession:
         """Returns the active ClientSession, raising an error if not started."""
         if self._session is None:
-            raise RuntimeError(f"Server '{self.name}' session not started.")
+            # This should ideally not happen if manage_lifecycle is used correctly
+            raise RuntimeError(f"Server '{self.name}' session not available or lifecycle not managed.")
         return self._session
 
-    async def start(self) -> None:
-        """Starts the underlying MCP server process and establishes a client session."""
-        if self._session is not None:
-            logger.warning(f"Server '{self.name}' already started.")
-            return
-
-        logger.info(f"Starting proxied server: {self.name}...")
+    @asynccontextmanager
+    async def manage_lifecycle(self) -> AsyncIterator[None]:
+        """Async context manager to handle the startup and shutdown of the server's session."""
+        logger.info(f"[{self.name}] Entering manage_lifecycle context...")
+        local_exit_stack = AsyncExitStack() # Stack specific to this server's lifecycle
         try:
+            logger.info(f"[{self.name}] Starting underlying process and establishing connection...")
             server_params = StdioServerParameters(
                 command=self.config.get("command", ""),
                 args=self.config.get("args", []),
                 env=self.config.get("env", None),
+                cwd=self.config.get("cwd", None) # Add cwd if needed
             )
 
-            # Use AsyncExitStack to manage the stdio_client context
-            self._client_cm = stdio_client(server_params)
-            read, write = await self._exit_stack.enter_async_context(self._client_cm)
+            # Enter stdio_client context managed by the local stack
+            stdio_cm = stdio_client(server_params)
+            read, write = await local_exit_stack.enter_async_context(stdio_cm)
 
-            # Use AsyncExitStack to manage the ClientSession context
+            # Enter ClientSession context managed by the local stack
             session_cm = ClientSession(read, write)
-            self._session = await self._exit_stack.enter_async_context(session_cm)
+            self._session = await local_exit_stack.enter_async_context(session_cm)
 
-            # Capture and store the InitializeResult
+            # Initialize the session
             self._server_info = await self._session.initialize()
-            logger.info(
-                f"Proxied server '{self.name}' started and initialized successfully."
-            )
-            # Optionally log server info/capabilities if needed for debugging
-            # logger.debug(f"Server '{self.name}' info: {self._server_info}")
+            logger.info(f"[{self.name}] Started and initialized successfully within manage_lifecycle.")
+
+            yield # Server is ready and session is active
 
         except Exception as e:
-            logger.error(f"Failed to start server '{self.name}': {e}", exc_info=True)
-            self._server_info = None  # Ensure server_info is None on failure
-            await self.stop()  # Attempt cleanup if start failed
-            raise
-
-    async def stop(self) -> None:
-        """Stops the underlying MCP server process and closes the client session."""
-        logger.info(f"Stopping proxied server: {self.name}...")
-        await self._exit_stack.aclose()
-        self._session = None
-        self._client_cm = None
-        self._server_info = None  # Clear server info on stop
-        logger.info(f"Proxied server '{self.name}' stopped.")
+            logger.error(f"[{self.name}] Failed during manage_lifecycle startup: {e}", exc_info=True)
+            # Ensure members are reset even if startup fails partially
+            self._session = None
+            self._server_info = None
+            # Allow the exception to propagate so lifespan knows it failed
+            raise 
+        finally:
+            logger.info(f"[{self.name}] Exiting manage_lifecycle context, cleaning up resources...")
+            # The local_exit_stack will automatically clean up stdio_client and ClientSession
+            await local_exit_stack.aclose() 
+            # Reset members after cleanup
+            self._session = None
+            self._server_info = None
+            logger.info(f"[{self.name}] Resources cleaned up.")
 
     # --- MCP Interaction Methods ---
 
@@ -321,47 +317,41 @@ async def lifespan(server: FastMCP) -> AsyncIterator[GetewayContext]:
     proxied_server_configs = load_config(cli_args.mcp_json_path)
 
     context = GetewayContext(plugin_manager=plugin_manager)
+    
+    # Use a single ExitStack for the entire lifespan to manage servers
+    async with AsyncExitStack() as lifespan_stack:
+        if not proxied_server_configs:
+            logger.warning(
+                "No proxied MCP servers configured. Running in standalone mode (plugins still active)."
+            )
+        else:
+            logger.info(f"Attempting to start {len(proxied_server_configs)} configured proxied servers...")
+            successfully_started_servers = {}
+            for name, server_config in proxied_server_configs.items():
+                logger.info(f"Creating and starting lifecycle management for proxied server: {name}")
+                proxied_server = Server(name, server_config)
+                try:
+                    # Enter the lifecycle context for this server using the lifespan stack
+                    await lifespan_stack.enter_async_context(proxied_server.manage_lifecycle())
+                    # If successful, add it to the context for tools
+                    successfully_started_servers[name] = proxied_server
+                    logger.info(f"Successfully started and added server '{name}' to context.")
+                except Exception as e:
+                    # Log error but continue trying to start other servers
+                    logger.error(f"Failed to start server '{name}' within lifespan: {e}", exc_info=False) # Don't need full trace usually
+            
+            context.proxied_servers = successfully_started_servers # Only add successfully started servers
+            logger.info(f"Finished starting servers. {len(context.proxied_servers)} successfully started.")
 
-    if not proxied_server_configs:
-        logger.warning(
-            "No proxied MCP servers configured. Running in standalone mode (plugins still active)."
-        )
-    else:
-        start_tasks = []
-        for name, server_config in proxied_server_configs.items():
-            logger.info(f"Creating client for proxied server: {name}")
-            proxied_server = Server(name, server_config)
-            context.proxied_servers[name] = proxied_server
-            start_tasks.append(asyncio.create_task(proxied_server.start()))
-
-        if start_tasks:
-            results = await asyncio.gather(*start_tasks, return_exceptions=True)
-            # Check results for errors during startup
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    # Find corresponding server name (requires maintaining order or mapping)
-                    server_name = list(proxied_server_configs.keys())[i]
-                    logger.error(
-                        f"Failed to start server '{server_name}' during gather: {result}",
-                        exc_info=result,
-                    )
-                    # Optionally remove failed server from context?
-                    # context.proxied_servers.pop(server_name, None)
-            logger.info("Attempted to start all configured proxied servers.")
-
-    try:
+        # Yield the context with successfully started servers
+        logger.info("MCP Gateway Lifespan entering operational state...")
         yield context
-    finally:
-        logger.info("MCP gateway lifespan shutting down...")
-        stop_tasks = [
-            asyncio.create_task(server.stop())
-            for server in context.proxied_servers.values()
-            if server._session is not None  # Only stop started servers
-        ]
-        if stop_tasks:
-            await asyncio.gather(*stop_tasks)
-            logger.info("All active proxied servers stopped.")
-        logger.info("MCP gateway shutdown complete.")
+        logger.info("MCP Gateway Lifespan exiting operational state...")
+
+    # --- Cleanup --- 
+    # The lifespan_stack automatically handles calling __aexit__ on each 
+    # successfully entered server's manage_lifecycle context upon exiting the 'async with'.
+    logger.info("MCP gateway lifespan shutdown complete (handled by AsyncExitStack).")
 
 
 # Initialize the MCP gateway server
@@ -371,148 +361,54 @@ mcp = FastMCP("MCP Gateway", lifespan=lifespan, version="0.1.0")
 
 @mcp.tool()
 async def get_metadata(ctx: Context) -> Dict[str, Any]:
-    """Provides metadata about all available proxied MCPs via a tool call."""
-    geteway_context: GetewayContext = ctx.request_context.lifespan_context
-    metadata: Dict[str, Any] = {}
+    """Internal tool to retrieve metadata about all proxied servers and their tools."""
+    gateway_context: GetewayContext = ctx.request_context.lifespan_context
+    all_metadata = {}
+    logger.info("[Gateway Tool] Received request for get_metadata")
 
-    if not geteway_context.proxied_servers:
-        return {"status": "standalone_mode", "message": "No proxied MCPs configured"}
+    if not gateway_context or not gateway_context.proxied_servers:
+        logger.warning("[Gateway Tool] get_metadata called, but no proxied servers found in context.")
+        return {"error": "No proxied servers configured or available."}
 
-    for name, server in geteway_context.proxied_servers.items():
-        server_metadata: Dict[str, Any] = {
-            "capabilities": None,
-            "tools": [],
-            "resources": [],
-            "prompts": [],  # Added prompts
-        }
+    for server_name, server_instance in gateway_context.proxied_servers.items():
+        logger.info(f"[Gateway Tool] Processing get_metadata for proxied server: {server_name}")
+        server_meta = {"description": server_instance.config.get("description", "N/A"), "tools": []}
         try:
-            # Ensure the session is active before fetching details
-            if not server.session:
-                server_metadata["error"] = "Server session not active"
-                metadata[name] = server_metadata
-                continue
+            # Ensure the server session is started and initialized before querying
+            if server_instance._session is None or server_instance._server_info is None:
+                 logger.warning(f"[Gateway Tool] Proxied server '{server_name}' session/info not ready. Attempting start...")
+                 # This might be risky if called concurrently, but let's try
+                 # await server_instance.start() # Avoid starting here, should be done in lifespan
+                 if server_instance._session is None or server_instance._server_info is None:
+                      logger.error(f"[Gateway Tool] Proxied server '{server_name}' still not ready after check. Skipping.")
+                      server_meta["error"] = "Server not initialized"
+                      all_metadata[server_name] = server_meta
+                      continue
 
-            # 1. Get Capabilities
-            capabilities = await server.get_capabilities()
-            server_metadata["capabilities"] = (
-                capabilities.model_dump() if capabilities else None
-            )
+            logger.debug(f"[Gateway Tool] Calling list_tools on proxied server: {server_name}")
+            tools_list = await server_instance.list_tools()
+            logger.debug(f"[Gateway Tool] list_tools returned for {server_name}. Found {len(tools_list)} tools.")
 
-            # 2. List Tools (only if supported)
-            if capabilities and capabilities.tools:
-                try:
-                    tools_result = await server.list_tools()
-                    # Assuming list_tools returns ListToolsResult with a 'tools' attribute
-                    # Adjust if the actual return type/structure is different
-                    if hasattr(tools_result, "tools"):
-                        server_metadata["tools"] = [
-                            tool.model_dump() for tool in tools_result.tools
-                        ]
-                    else:
-                        # Handle unexpected result structure if necessary
-                        logger.warning(
-                            f"Server '{name}' list_tools returned unexpected structure: {type(tools_result)}"
-                        )
-                        # Attempt to use the result directly if it's already a list (might be List[Tool])
-                        if isinstance(tools_result, list):
-                            server_metadata["tools"] = [
-                                tool.model_dump() for tool in tools_result
-                            ]
-
-                except Exception as tool_err:
-                    logger.error(
-                        f"Error calling list_tools on server '{name}' despite capability report: {tool_err}",
-                        exc_info=True,
-                    )
-                    server_metadata["tools_error"] = f"Failed list_tools: {tool_err}"
-            else:
-                logger.info(
-                    f"Server '{name}' does not support tools capability, skipping list_tools."
-                )
-
-            # 3. List Resources (only if supported)
-            if capabilities and capabilities.resources:
-                try:
-                    resources_result = await server.list_resources()
-                    # Assuming list_resources returns ListResourcesResult with a 'resources' attribute
-                    # Adjust if the actual return type/structure is different
-                    if hasattr(resources_result, "resources"):
-                        server_metadata["resources"] = [
-                            res.model_dump() for res in resources_result.resources
-                        ]
-                    else:
-                        # Handle unexpected result structure
-                        logger.warning(
-                            f"Server '{name}' list_resources returned unexpected structure: {type(resources_result)}"
-                        )
-                        if isinstance(resources_result, list):
-                            server_metadata["resources"] = [
-                                res.model_dump() for res in resources_result
-                            ]
-
-                except Exception as res_err:
-                    logger.error(
-                        f"Error calling list_resources on server '{name}' despite capability report: {res_err}",
-                        exc_info=True,
-                    )
-                    server_metadata["resources_error"] = (
-                        f"Failed list_resources: {res_err}"
-                    )
-            else:
-                logger.info(
-                    f"Server '{name}' does not support resources capability, skipping list_resources."
-                )
-
-            # 4. List Prompts (only if supported)
-            if capabilities and capabilities.prompts:
-                try:
-                    prompts_result = await server.list_prompts()
-                    # Handle both potential return structures
-                    if hasattr(prompts_result, "prompts"):
-                        server_metadata["prompts"] = [
-                            p.model_dump() for p in prompts_result.prompts
-                        ]
-                    else:
-                        # Handle direct list return
-                        logger.warning(
-                            f"Server '{name}' list_prompts returned unexpected structure: {type(prompts_result)}"
-                        )
-                        if isinstance(prompts_result, list):
-                            server_metadata["prompts"] = [
-                                p.model_dump() for p in prompts_result
-                            ]
-                except Exception as prompt_err:
-                    logger.error(
-                        f"Error calling list_prompts on server '{name}' despite capability report: {prompt_err}",
-                        exc_info=True,
-                    )
-                    server_metadata["prompts_error"] = (
-                        f"Failed list_prompts: {prompt_err}"
-                    )
-            else:
-                logger.info(
-                    f"Server '{name}' does not support prompts capability, skipping list_prompts."
-                )
-
-            metadata[name] = server_metadata
-
+            if tools_list:
+                 # Convert tools to the expected dictionary format if necessary
+                 # Assuming list_tools returns a list of types.Tool objects
+                 for tool in tools_list:
+                     tool_dict = {
+                         "name": tool.name,
+                         "description": tool.description,
+                         # Use model_dump or dict() depending on pydantic version if inputSchema is a model
+                         "inputSchema": tool.inputSchema.model_dump() if hasattr(tool.inputSchema, 'model_dump') else tool.inputSchema.dict() if hasattr(tool.inputSchema, 'dict') else tool.inputSchema,
+                         # Add other relevant fields if needed
+                     }
+                     server_meta["tools"].append(tool_dict)
+            all_metadata[server_name] = server_meta
         except Exception as e:
-            # Catch general errors for this server's metadata retrieval
-            logger.error(
-                f"General error getting metadata for server '{name}': {e}",
-                exc_info=True,
-            )
-            metadata[name] = {
-                "error": f"Failed to retrieve metadata: {e}",
-                "capabilities": server_metadata.get(
-                    "capabilities"
-                ),  # Include caps if fetched before error
-                "tools": [],
-                "resources": [],
-                "prompts": [],
-            }
-
-    return metadata
+            logger.error(f"[Gateway Tool] Error getting metadata for server '{server_name}': {e}", exc_info=True)
+            server_meta["error"] = str(e)
+            all_metadata[server_name] = server_meta
+    
+    logger.info("[Gateway Tool] Finished processing get_metadata for all servers.")
+    return all_metadata
 
 
 @mcp.tool()
