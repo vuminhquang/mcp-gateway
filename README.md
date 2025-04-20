@@ -21,7 +21,9 @@ pip install mcp-gateway
 
 > `--enable-guardrails` - you can use this to activate multiple guardrail plugins
 
-Cursor example:
+<details>
+<summary>Cursor example:</summary>
+
 ```json
 {
   "mcpServers": {
@@ -47,6 +49,43 @@ Cursor example:
   }
 }
 ```
+</details>
+
+<details>
+<summary>Claude example:</summary>
+
+Get `<PYTHON_PATH>`
+```bash
+which python
+```
+```json
+{
+  "mcpServers": {
+      "mcp-gateway": {
+          "command": "<python path>",
+          "args": [
+            "-m",
+            "mcp_gateway.server",
+            "--mcp-json-path",
+            "<path to claude_desktop_config>",
+            "--enable-guardrails",
+            "basic"
+          ],
+          "servers": {
+              "filesystem": {
+                  "command": "npx",
+                  "args": [
+                      "-y",
+                      "@modelcontextprotocol/server-filesystem",
+                      "."
+                  ]
+              }
+          }
+      }
+  }
+}
+```
+</details>
 
 This example gives you the basic and presidio guardrails for token and PII masking for filesystem MCP.
 You can add more MCPs that will be under the Gateway by putting the MCP server configuration under the "servers" key.
