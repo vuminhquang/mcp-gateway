@@ -5,6 +5,8 @@ from xetrack import Tracker
 from xetrack.logging import LOGURU_PARAMS
 from mcp_gateway.plugins.base import TracingPlugin, PluginContext
 from uuid import uuid4
+from pathlib import Path
+import os
 logger = logging.getLogger(__name__)
 
 class XetrackParams:
@@ -119,6 +121,8 @@ class XetrackTracingPlugin(TracingPlugin):
         self.logs_path = config.get("logs_path", self.logs_path)
         self.logs_stdout = config.get("logs_stdout", self.logs_stdout)
         self.db_path = config.get("db_path", self.db_path)
+        # Fix duckdb sqlite externsion issue when home is not set
+        os.environ['HOME'] = Path.home().as_posix() 
         self.tracker = Tracker(db=self.db_path, 
                                logs_path=self.logs_path, 
                                logs_stdout=self.logs_stdout, 
