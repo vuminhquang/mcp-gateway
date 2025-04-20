@@ -250,13 +250,13 @@ mcp-gateway --enable-tracing xetrack
             "command": "mcp-gateway",
             "args": [
                 "--mcp-json-path",
-                "~/development/xdss/mcp-gateway/.cursor/mcp.json",
+                "~/.cursor/mcp.json",
                 "--enable-tracing",
                 "xetrack"
             ],
             "env": {
                 "XETRACK_DB_PATH": "tracing.db",
-                "XETRACK_LOGS_PATH": "logs/",                
+                "XETRACK_LOGS_PATH": "logs/"                
             },
             "servers": {
                 "filesystem": {
