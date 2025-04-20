@@ -236,27 +236,6 @@ The Lasso guardrail checks content through Lasso's API for security violations b
 
 Read more on our website 👉 [Lasso Security](https://www.lasso.security/).
 
-## How It Works
-Your agent interacts directly with our MCP Gateway, which functions as a central router and management system. Each underlying MCP is individually wrapped and managed.
-
-Key Features
-
-**Agnostic Guardrails**
-* Applies configurable security filters to both requests and responses.
-* Prevents sensitive data exposure before information reaches your agent.
-* Works consistently across all connected MCPs regardless of their native capabilities.
-
-**Unified Visibility**
-* Provides comprehensive dashboard for all your MCPs in a single interface.
-* Includes intelligent risk assessment with MCP risk scoring.
-* Delivers real-time status monitoring and performance metrics.
-
-**Advanced Tracking**
-* Maintains detailed logs of all requests and responses for each guardrail.
-* Offers cost evaluation tools for MCPs requiring paid tokens.
-* Provides usage analytics and pattern identification for optimization.
-* Sanitizes sensitive information before forwarding requests to other MCPs.
-
 ## Tracing
 
 ### Xetrack
@@ -362,7 +341,26 @@ D SELECT server_name,capability_name,path,content_text FROM db.events LIMIT 1;
 
 Of course you can use another MCP server to query the sqlite database 😊
 
+## How It Works
+Your agent interacts directly with our MCP Gateway, which functions as a central router and management system. Each underlying MCP is individually wrapped and managed.
 
+Key Features
+
+**Agnostic Guardrails**
+* Applies configurable security filters to both requests and responses.
+* Prevents sensitive data exposure before information reaches your agent.
+* Works consistently across all connected MCPs regardless of their native capabilities.
+
+**Unified Visibility**
+* Provides comprehensive dashboard for all your MCPs in a single interface.
+* Includes intelligent risk assessment with MCP risk scoring.
+* Delivers real-time status monitoring and performance metrics.
+
+**Advanced Tracking**
+* Maintains detailed logs of all requests and responses for each guardrail.
+* Offers cost evaluation tools for MCPs requiring paid tokens.
+* Provides usage analytics and pattern identification for optimization.
+* Sanitizes sensitive information before forwarding requests to other MCPs.
 
 ## License
 
