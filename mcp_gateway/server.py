@@ -600,16 +600,15 @@ async def run_tool(
         )
     except Exception as e:
         # Catch other general exceptions during the proxied tool call or plugin execution
-        logger.error(
-            f"Error processing tool '{tool_name}' on server '{server_name}': {e}",
-            exc_info=True,
-        )
+        error_message_string = f"Error executing tool '{tool_name}' on server '{server_name}': {e}"
+        logger.error(error_message_string, exc_info=True)
+        # Format the content field correctly as a list containing TextContent
         return types.CallToolResult(
-            content=f"Error executing tool '{tool_name}' on server '{server_name}': {e}",
+            content=[{"type": "text", "text": error_message_string}],
             outputs=[
                 {
                     "type": "error",
-                    "message": f"Error executing tool '{tool_name}' on server '{server_name}': {e}",
+                    "message": error_message_string,
                 }
             ]
         )
