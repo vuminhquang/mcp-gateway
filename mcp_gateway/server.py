@@ -222,6 +222,7 @@ class Server:
             )
             # Return an error result structured for CallToolResult
             return types.CallToolResult(
+                content="Request blocked by gateway policy for tool '" + name + "'.",
                 outputs=[
                     {
                         "type": "error",
@@ -542,6 +543,7 @@ async def run_tool(
         # Should not happen if lifespan setup is correct
         logger.error("PluginManager not found in context. Cannot execute tool.")
         return types.CallToolResult(
+            content="Gateway configuration error: PluginManager missing.",
             outputs=[
                 {
                     "type": "error",
@@ -553,6 +555,7 @@ async def run_tool(
     if not proxied_server:
         logger.error(f"Attempted to run tool on unknown server: {server_name}")
         return types.CallToolResult(
+            content=f"Proxied server '{server_name}' not found.",
             outputs=[
                 {
                     "type": "error",
@@ -563,6 +566,7 @@ async def run_tool(
     if proxied_server.session is None:
         logger.error(f"Attempted to run tool on inactive server: {server_name}")
         return types.CallToolResult(
+            content=f"Proxied server '{server_name}' session is not active.",
             outputs=[
                 {
                     "type": "error",
@@ -591,6 +595,7 @@ async def run_tool(
         )
         # Return the error structured for the LLM
         return types.CallToolResult(
+            content=f"Gateway policy violation: {se}",
             outputs=[{"type": "error", "message": f"Gateway policy violation: {se}"}]
         )
     except Exception as e:
@@ -600,6 +605,7 @@ async def run_tool(
             exc_info=True,
         )
         return types.CallToolResult(
+            content=f"Error executing tool '{tool_name}' on server '{server_name}': {e}",
             outputs=[
                 {
                     "type": "error",
