@@ -21,7 +21,9 @@ pip install mcp-gateway
 
 > `--enable-guardrails` - you can use this to activate multiple guardrail plugins
 
-Cursor example:
+<details>
+<summary>Cursor example:</summary>
+
 ```json
 {
   "mcpServers": {
@@ -47,6 +49,43 @@ Cursor example:
   }
 }
 ```
+</details>
+
+<details>
+<summary>Claude example:</summary>
+
+Get `<PYTHON_PATH>`
+```bash
+which python
+```
+```json
+{
+  "mcpServers": {
+      "mcp-gateway": {
+          "command": "<python path>",
+          "args": [
+            "-m",
+            "mcp_gateway.server",
+            "--mcp-json-path",
+            "<path to claude_desktop_config>",
+            "--enable-guardrails",
+            "basic"
+          ],
+          "servers": {
+              "filesystem": {
+                  "command": "npx",
+                  "args": [
+                      "-y",
+                      "@modelcontextprotocol/server-filesystem",
+                      "."
+                  ]
+              }
+          }
+      }
+  }
+}
+```
+</details>
 
 This example gives you the basic and presidio guardrails for token and PII masking for filesystem MCP.
 You can add more MCPs that will be under the Gateway by putting the MCP server configuration under the "servers" key.
@@ -196,6 +235,111 @@ Example:
 The Lasso guardrail checks content through Lasso's API for security violations before processing requests and responses.
 
 Read more on our website 👉 [Lasso Security](https://www.lasso.security/).
+
+## Tracing
+
+### Xetrack
+[xetrack](https://github.com/xdssio/xetrack) is a lightweight package to track ml experiments, benchmarks, and monitor stractured data.
+
+We can use it to debug and monitor **tool calls** with logs ([loguru](https://github.com/Delgan/loguru)) or [duckdb](https://duckdb.org) and [sqlite](https://sqlite.org).   .
+
+```bash
+mcp-gateway --enable-tracing xetrack
+
+```
+#### Prerequisites
+`pip install xetrack`
+
+#### Params
+* `XETRACK_DB_PATH` - The sqlite db location. 
+    * All logs register in the *events* table.
+    * If fancy objects return from the MCPs response, read about xetrack [assets](https://github.com/xdssio/xetrack?tab=readme-ov-file#track-assets-oriented-for-ml-models) to retrive it. 
+* `XETRACK_LOGS_PATH` - The logs location
+* `FLATTEN_ARGUMENTS` - Flatten the arguments, default `true`
+* `FLATTEN_RESPONSE` - Flatten the response, default `true`
+* It is recommend to to gitignore the logs location
+* It is recommended to use [DVC](http://dvc.org) to manage the db file
+
+#### Quickstart 
+```json
+{
+    "mcpServers": {
+        "mcp-gateway": {
+            "command": "mcp-gateway",
+            "args": [
+                "--mcp-json-path",
+                "~/.cursor/mcp.json",
+                "--enable-tracing",
+                "xetrack"
+            ],
+            "env": {
+                "XETRACK_DB_PATH": "tracing.db",
+                "XETRACK_LOGS_PATH": "logs/"                
+            },
+            "servers": {
+                "filesystem": {
+                    "command": "npx",
+                    "args": [
+                        "-y",
+                        "@modelcontextprotocol/server-filesystem",
+                        "."
+                    ]
+                }
+            }
+        }
+    }
+}
+```
+
+Let's say you use the  filesystem *list_directory* tool on path *"."*, you can find the call parameters under `logs/<date>.log`.
+
+You can expolre using [xetrack cli](https://github.com/xdssio/xetrack?tab=readme-ov-file#cli) to query the db:
+
+```bash
+$ xt tail tracing.db --json --n=1
+[
+    {
+        "timestamp": "2025-04-17 17:12:48.233126",
+        "track_id": "mottled-stingray-0411",
+        "meta": "f3be31e09667745f",
+        "paths": null,
+        "call_id": "deab617e-0a45-4950-9de9-3fb549810cf2",
+        "capability_name": "list_directory",
+        "content_type": "text",
+        "content_annotations": "f3be31e09667745f",
+        "response_type": "CallToolResult",
+        "server_name": "filesystem",
+        "capability_type": "tool",
+        "isError": 0,
+        "content_text": "[DIR] .cursor\n[DIR] .git\n[FILE] .gitignore\n[DIR] .pytest_cache\n[DIR] .venv\n[FILE] LICENSE\n[FILE] MANIFEST.in\n[FILE] README.md\n[DIR] docs\n[DIR] logs\n[DIR] mcp_gateway\n[FILE] pyproject.toml\n[FILE] requirements.txt\n[DIR] tests\n[DIR] tmp",
+        "path": ".",
+        "prompt": null
+    }
+]
+```
+With python
+```python
+from xetrack import Reader
+
+df = Reader("tracing.db").to_df()
+```
+
+
+With duckdb cli and ui 
+```bash
+$ duckdb --ui
+D INSTALL sqlite; LOAD sqlite; ATTACH 'tracing.db' (TYPE sqlite);
+D SELECT server_name,capability_name,path,content_text FROM db.events LIMIT 1;
+
+┌─────────────┬─────────────────┬─────────┬────────────────────────────────────┐
+│ server_name │ capability_name │  path   │            content_text            │
+│   varchar   │     varchar     │ varchar │              varchar               │
+├─────────────┼─────────────────┼─────────┼────────────────────────────────────┤
+│ filesystem  │ list_directory  │ .       │ [DIR] .cursor\n[DIR] .git\n[FILE…  │
+└─────────────┴─────────────────┴─────────┴────────────────────────────────────┘
+```
+
+Of course you can use another MCP server to query the sqlite database 😊
 
 ## How It Works
 Your agent interacts directly with our MCP Gateway, which functions as a central router and management system. Each underlying MCP is individually wrapped and managed.
